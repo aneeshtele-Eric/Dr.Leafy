@@ -16,23 +16,44 @@ const port = parseInt(process.env.PORT || '3000', 10);
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 
-// Initialize Google Gen AI
-const apiKey = process.env.GEMINI_API_KEY || '';
-const ai = new GoogleGenAI({
-  apiKey,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
-    },
-  },
-});
+// Model resolver with safe fallback to active Google Gemini models
+const DEFAULT_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 
-// API: Diagnose Plant Specimen via Gemini 3.8 Flash Vision / Reasoning
+// Safe lazy initialization of Google Gen AI to prevent crash if key is missing
+function getAiClient(): GoogleGenAI | null {
+  const apiKey = process.env.GEMINI_API_KEY || '';
+  if (!apiKey) return null;
+  try {
+    return new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'dr-leafy-botanical-app',
+        },
+      },
+    });
+  } catch (err) {
+    console.error('Failed to initialize GoogleGenAI client:', err);
+    return null;
+  }
+}
+
+// Utility: Strip Markdown code blocks from JSON model responses
+function parseCleanJson(text: string): any {
+  const cleaned = text
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '');
+  return JSON.parse(cleaned);
+}
+
+// API: Diagnose Plant Specimen via Gemini Vision / Reasoning
 app.post('/api/diagnose', async (req, res) => {
   try {
     const { imageBase64, mimeType = 'image/jpeg', symptoms = '', plantHint = '' } = req.body;
+    const ai = getAiClient();
 
-    if (!apiKey) {
+    if (!ai) {
       return res.status(500).json({
         error: 'GEMINI_API_KEY is not configured in the server environment.',
       });
@@ -47,7 +68,7 @@ You MUST respond strictly in valid JSON matching this schema:
   "commonName": "Common colloquial name (e.g. Swiss Cheese Plant)",
   "latinName": "Full botanical binomial name (e.g. Monstera Deliciosa Liebm.)",
   "matchPct": "Confidence percentage string (e.g. 96% match)",
-  "baseVigor": 80, // Number 40-95
+  "baseVigor": 80,
   "severity": {
     "text": "Condition name (e.g. Moderate Under-watering & Leaf Blight)",
     "chip": "Triage stage (e.g. Stage 2 Triage)",
@@ -56,7 +77,7 @@ You MUST respond strictly in valid JSON matching this schema:
     "bgClass": "bg-[#FAF0E6] | bg-[#EAF4EE]"
   },
   "prognosis": {
-    "prognosisText": "Short prognosis (e.g. Prognosis: Optimistic (14–21 days))",
+    "prognosisText": "Short prognosis (e.g. Prognosis: Optimistic (14-21 days))",
     "prognosisSummary": "Summary (e.g. High Recovery Likelihood)",
     "prognosisDetail": "HTML string with recovery expected timeframe in <strong> tags",
     "checkinText": "Next check-in: In X days"
@@ -81,7 +102,7 @@ You MUST respond strictly in valid JSON matching this schema:
   "phases": [
     {
       "number": 1,
-      "title": "Phase 1 • Day 0: Emergency Care",
+      "title": "Phase 1: Emergency Care",
       "badge": "Immediate action",
       "badgeClass": "text-alert-terracotta bg-[#FAF0E6] border border-alert-terracotta/15",
       "circleBg": "bg-primary-container text-on-primary",
@@ -92,7 +113,7 @@ You MUST respond strictly in valid JSON matching this schema:
     },
     {
       "number": 2,
-      "title": "Phase 2 • Week 1: Active Treatment",
+      "title": "Phase 2: Active Treatment",
       "badge": "",
       "circleBg": "bg-secondary text-on-secondary",
       "tasks": [
@@ -102,7 +123,7 @@ You MUST respond strictly in valid JSON matching this schema:
     },
     {
       "number": 3,
-      "title": "Phase 3 • Week 2–4: Recovery & New Growth",
+      "title": "Phase 3: Recovery & New Growth",
       "badge": "",
       "circleBg": "bg-outline text-surface-card",
       "tasks": [
@@ -115,7 +136,7 @@ You MUST respond strictly in valid JSON matching this schema:
     "organicRemedies": [
       {
         "title": "DIY Homemade Remedy Title",
-        "badge": "100% Pet-Safe | Organic Standard | Gentle Tonic",
+        "badge": "100% Pet-Safe",
         "desc": "Recipe and application instruction",
         "usage": "Application frequency"
       }
@@ -123,7 +144,7 @@ You MUST respond strictly in valid JSON matching this schema:
     "commercialSolutions": [
       {
         "title": "Commercial Product Solution",
-        "badge": "Keep away from pets | Child-safe capped",
+        "badge": "Keep away from pets",
         "desc": "Active chemical/mineral ingredient and mode of action",
         "linkText": "Find & Buy"
       }
@@ -140,13 +161,12 @@ You MUST respond strictly in valid JSON matching this schema:
         },
       });
     }
-
     const textContent = `Diagnose this specimen.\nObserved symptoms: ${symptoms || 'None specifically provided'}.\nPlant type hint: ${plantHint || 'Unknown houseplant'}.`;
     parts.push({ text: textContent });
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: { parts },
+      model: DEFAULT_MODEL,
+      contents: [{ role: 'user', parts }],
       config: {
         systemInstruction: systemPrompt,
         responseMimeType: 'application/json',
@@ -154,7 +174,7 @@ You MUST respond strictly in valid JSON matching this schema:
     });
 
     const outputText = response.text || '{}';
-    const parsed = JSON.parse(outputText);
+    const parsed = parseCleanJson(outputText);
     return res.json(parsed);
   } catch (error: any) {
     console.error('Diagnosis error:', error);
@@ -164,7 +184,7 @@ You MUST respond strictly in valid JSON matching this schema:
   }
 });
 
-// API: Search Grounding via Google Search + Gemini Model
+// API: Search Grounding via Google Search + Gemini
 app.post('/api/search-grounding', async (req, res) => {
   try {
     const { query } = req.body;
@@ -172,7 +192,8 @@ app.post('/api/search-grounding', async (req, res) => {
       return res.status(400).json({ error: 'Query is required.' });
     }
 
-    if (!apiKey) {
+    const ai = getAiClient();
+    if (!ai) {
       return res.status(500).json({
         error: 'GEMINI_API_KEY is not configured in the server environment.',
       });
@@ -186,7 +207,7 @@ Provide a concise, helpful, and scientifically accurate plant care breakdown inc
 Keep it formatted cleanly with clear markdown headings and bullet points.`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+      model: DEFAULT_MODEL,
       contents: prompt,
       config: {
         tools: [{ googleSearch: {} }],
@@ -194,10 +215,11 @@ Keep it formatted cleanly with clear markdown headings and bullet points.`;
     });
 
     const text = response.text || '';
-    const groundingChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
-    const webSearchQueries = response.candidates?.[0]?.groundingMetadata?.webSearchQueries || [];
+    const candidate = response.candidates?.[0];
+    const metadata = candidate?.groundingMetadata || (candidate as any)?.grounding_metadata;
+    const groundingChunks = metadata?.groundingChunks || metadata?.grounding_chunks || [];
+    const webSearchQueries = metadata?.webSearchQueries || metadata?.web_search_queries || [];
 
-    // Format sources
     const sources = groundingChunks
       .filter((chunk: any) => chunk.web && chunk.web.uri)
       .map((chunk: any) => ({
@@ -222,8 +244,9 @@ Keep it formatted cleanly with clear markdown headings and bullet points.`;
 app.post('/api/ask-doctor', async (req, res) => {
   try {
     const { question, patientContext, soilMoisture } = req.body;
+    const ai = getAiClient();
 
-    if (!apiKey) {
+    if (!ai) {
       return res.status(500).json({
         error: 'GEMINI_API_KEY is not configured in the server environment.',
       });
@@ -238,7 +261,7 @@ User's Observation/Question: ${question || 'Checking in on soil and recovery sta
 Provide a 2-3 sentence reassuring and actionable clinical advice note for the botanist caregiver. Include what immediate next step they should take (e.g. aerating, withholding water, bottom-soaking, misting).`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+      model: DEFAULT_MODEL,
       contents: prompt,
       config: {
         systemInstruction: 'You are Dr. Leafy, an expert friendly plant doctor.',
@@ -247,7 +270,10 @@ Provide a 2-3 sentence reassuring and actionable clinical advice note for the bo
     });
 
     const reply = response.text || '';
-    const groundingChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+    const candidate = response.candidates?.[0];
+    const metadata = candidate?.groundingMetadata || (candidate as any)?.grounding_metadata;
+    const groundingChunks = metadata?.groundingChunks || metadata?.grounding_chunks || [];
+
     const sources = groundingChunks
       .filter((chunk: any) => chunk.web && chunk.web.uri)
       .map((chunk: any) => ({
@@ -264,14 +290,13 @@ Provide a 2-3 sentence reassuring and actionable clinical advice note for the bo
   }
 });
 
-// API: Auth Simulation (Email & Mobile)
+// Auth Simulation Routes
 app.post('/api/auth/send-otp', async (req, res) => {
-  const { type, destination } = req.body; // type: 'mobile' | 'email'
+  const { destination } = req.body;
   if (!destination) {
     return res.status(400).json({ error: 'Email or Mobile number is required' });
   }
-  // Generate demo 6-digit OTP
-  const otp = '882100'; // Recognizable demo OTP matching patient DL-8821
+  const otp = '882100';
   return res.json({
     success: true,
     message: `Verification code sent to ${destination}`,
@@ -284,13 +309,13 @@ app.post('/api/auth/verify-otp', async (req, res) => {
   if (!destination || !otp) {
     return res.status(400).json({ error: 'Destination and verification code are required' });
   }
-  // Any 6-digit code or demo OTP is accepted
   const user = {
     id: 'user_leafy_' + Math.random().toString(36).substring(2, 8),
     name: name || (type === 'mobile' ? `Botanist ${destination.slice(-4)}` : destination.split('@')[0]),
     email: type === 'email' ? destination : `${destination.replace(/[^0-9]/g, '')}@botanist.drleafy.ai`,
     phone: type === 'mobile' ? destination : '+1 (555) 234-5678',
-    avatar: 'https://lh3.googleusercontent.com/aida-public/AB6AXuDBvQfTJJBjWAZkoIL3H6qVdfjNX8MS1aktaurhzzaqpUY5vLSZ0SXF-DGhgzAwtfkXSxpp7xgPzgzeQsGCzziytJKk9ama4gWInS03dQUkLwAmcK5hgVPmTiedfWoc_HjThGbnrefsSKIPlZl-4rolX-1rzTTXXEqKUbvjyz1ulBOkx2ZkEFxUl6Z8OHPUD4v_Yuzpc6lVP9D8N0nUIHovhJhaXrRznDtzAyeOtOHyUtdvEd9LnGRB4w',
+    avatar:
+      'https://lh3.googleusercontent.com/aida-public/AB6AXuDBvQfTJJBjWAZkoIL3H6qVdfjNX8MS1aktaurhzzaqpUY5vLSZ0SXF-DGhgzAwtfkXSxpp7xgPzgzeQsGCzziytJKk9ama4gWInS03dQUkLwAmcK5hgVPmTiedfWoc_HjThGbnrefsSKIPlZl-4rolX-1rzTTXXEqKUbvjyz1ulBOkx2ZkEFxUl6Z8OHPUD4v_Yuzpc6lVP9D8N0nUIHovhJhaXrRznDtzAyeOtOHyUtdvEd9LnGRB4w',
     role: 'Lead Conservatory Caregiver',
     joinedDate: 'October 2026',
     activePatientsCount: 3,
@@ -298,7 +323,7 @@ app.post('/api/auth/verify-otp', async (req, res) => {
   return res.json({ success: true, user });
 });
 
-// Setup Vite middleware in dev or static files in prod
+// Setup Vite middleware in dev or static files in production
 async function startServer() {
   if (process.env.NODE_ENV === 'production') {
     app.use(express.static(path.resolve(__dirname, 'dist')));
@@ -314,7 +339,7 @@ async function startServer() {
   }
 
   app.listen(port, '0.0.0.0', () => {
-    console.log(`Dr. Leafy server listening on port ${port}`);
+    console.log(`Dr. Leafy server listening on port ${port} (model: ${DEFAULT_MODEL})`);
   });
 }
 
