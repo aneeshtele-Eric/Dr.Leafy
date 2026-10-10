@@ -1,0 +1,6 @@
+{
+  "name": "Dr. Leafy — AI Plant Doctor",
+  "description": "Horticultural AI diagnostic engine and plant recovery room with Gemini vision analysis, Google Search grounding, interactive recovery roadmaps, and conservatory care management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
